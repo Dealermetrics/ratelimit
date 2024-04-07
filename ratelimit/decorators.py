@@ -5,12 +5,10 @@ This module includes the decorator used to rate limit function invocations.
 Additionally this module includes a naive retry strategy to be used in
 conjunction with the rate limit decorator.
 '''
-from functools import wraps
 from math import floor
 
-import time
 import sys
-import threading
+import asyncio
 
 from ratelimit.exception import RateLimitException
 from ratelimit.utils import now
@@ -19,7 +17,7 @@ class RateLimitDecorator(object):
     '''
     Rate limit decorator class.
     '''
-    def __init__(self, calls=15, period=900, clock=now(), raise_on_limit=True):
+    def __init__(self, calls=15, period=900, clock=now(), raise_on_limit=True, call_func_on_fail=None):
         '''
         Instantiate a RateLimitDecorator with some sensible defaults. By
         default the Twitter rate limiting window is respected (15 calls every
@@ -38,9 +36,7 @@ class RateLimitDecorator(object):
         # Initialise the decorator state.
         self.last_reset = clock()
         self.num_calls = 0
-
-        # Add thread safety.
-        self.lock = threading.RLock()
+        self.call_func = call_func_on_fail
 
     def __call__(self, func):
         '''
@@ -51,8 +47,7 @@ class RateLimitDecorator(object):
         :return: Decorated function.
         :rtype: function
         '''
-        @wraps(func)
-        def wrapper(*args, **kargs):
+        async def wrapper(*args, **kargs):
             '''
             Extend the behaviour of the decorated function, forwarding function
             invocations previously called no sooner than a specified period of
@@ -64,25 +59,26 @@ class RateLimitDecorator(object):
             :param kargs: keyworded variable length argument list to the decorated function.
             :raises: RateLimitException
             '''
-            with self.lock:
-                period_remaining = self.__period_remaining()
+            period_remaining = self.__period_remaining()
 
-                # If the time window has elapsed then reset.
-                if period_remaining <= 0:
-                    self.num_calls = 0
-                    self.last_reset = self.clock()
+            # If the time window has elapsed then reset.
+            if period_remaining <= 0:
+                self.num_calls = 0
+                self.last_reset = self.clock()
 
-                # Increase the number of attempts to call the function.
-                self.num_calls += 1
+            # Increase the number of attempts to call the function.
+            self.num_calls += 1
 
-                # If the number of attempts to call the function exceeds the
-                # maximum then raise an exception.
-                if self.num_calls > self.clamped_calls:
-                    if self.raise_on_limit:
-                        raise RateLimitException('too many calls', period_remaining)
-                    return
+            # If the number of attempts to call the function exceeds the
+            # maximum then raise an exception.
+            if self.num_calls > self.clamped_calls:
+                if self.raise_on_limit:
+                    if self.call_func is not None:
+                        await self.call_func()
+                    raise RateLimitException('too many calls', period_remaining)
+                return
 
-            return func(*args, **kargs)
+            return await func(*args, **kargs)
         return wrapper
 
     def __period_remaining(self):
@@ -104,8 +100,7 @@ def sleep_and_retry(func):
     :return: Decorated function.
     :rtype: function
     '''
-    @wraps(func)
-    def wrapper(*args, **kargs):
+    async def wrapper(*args, **kargs):
         '''
         Call the rate limited function. If the function raises a rate limit
         exception sleep for the remaing time period and retry the function.
@@ -115,7 +110,7 @@ def sleep_and_retry(func):
         '''
         while True:
             try:
-                return func(*args, **kargs)
+                return await func(*args, **kargs)
             except RateLimitException as exception:
-                time.sleep(exception.period_remaining)
+                await asyncio.sleep(exception.period_remaining)
     return wrapper
