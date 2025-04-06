@@ -72,11 +72,10 @@ class RateLimitDecorator(object):
             # If the number of attempts to call the function exceeds the
             # maximum then raise an exception.
             if self.num_calls > self.clamped_calls:
+                if self.call_func is not None:
+                    await self.call_func()
                 if self.raise_on_limit:
-                    if self.call_func is not None:
-                        await self.call_func()
                     raise RateLimitException('too many calls', period_remaining)
-                return
 
             return await func(*args, **kargs)
         return wrapper
